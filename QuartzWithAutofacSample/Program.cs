@@ -1,4 +1,5 @@
-﻿using Quartz;
+﻿using Autofac;
+using Quartz;
 using Quartz.Impl;
 using System;
 using System.Collections.Generic;
@@ -13,6 +14,8 @@ namespace Idv.CircleHsiao.QuartzWithAutofacSample
 {
     class Program
     {
+        private static IContainer _container;
+
         static void Main(string[] args)
         {
             #region Sample data
@@ -69,6 +72,7 @@ namespace Idv.CircleHsiao.QuartzWithAutofacSample
             };
             #endregion
 
+            #region Dlls & implemented class scan
             // Read dlls
             DirectoryInfo dirToScan = new DirectoryInfo(@"../../../");
             FileInfo[] files = dirToScan.GetFiles("*.dll", SearchOption.AllDirectories);
@@ -76,6 +80,7 @@ namespace Idv.CircleHsiao.QuartzWithAutofacSample
 
             // Search and collect classes implemented IJob
             List<Type> typesImplIJob = new List<Type>();
+            List<Assembly> asmCollToReg = new List<Assembly>();
             dlls.ForEach(dll =>
             {
                 Assembly asm = Assembly.LoadFrom(dll);
@@ -84,13 +89,21 @@ namespace Idv.CircleHsiao.QuartzWithAutofacSample
                         if (eachType.GetInterface("IJob") != null && // must impl IJob
                             schSetting.JobSettings.Any(j => j.Namespace == eachType.Namespace) && // also belongs to our solu
                             !typesImplIJob.Any(tij => tij.Name == eachType.Name)) // and not repeated
+                        {
                             typesImplIJob.Add(eachType);
+                            asmCollToReg.Add(asm);
+                        }
             });
+            #endregion
 
+            var builder = new ContainerBuilder();
             ISchedulerFactory sf = new StdSchedulerFactory();
             var sched = sf.GetScheduler();
             typesImplIJob.ForEach(typeImplIJob =>
             {
+                builder.RegisterAssemblyTypes(asmCollToReg.ToArray())
+                    .Where(t => t.Name == typeImplIJob.Name).Keyed<IJob>(typeImplIJob.Name);
+
                 #region Create JobDetail by sample data
 
                 JobSetting jSett = schSetting.JobSettings.FirstOrDefault(j => j.Name == typeImplIJob.Name);
@@ -150,7 +163,8 @@ namespace Idv.CircleHsiao.QuartzWithAutofacSample
                 });
                 #endregion
             });
-
+            _container = builder.Build();
+            var test = _container.ResolveKeyed<IJob>("MyJob2");
 
             // start the schedule
             sched.Start();
