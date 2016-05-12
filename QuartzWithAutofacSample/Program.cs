@@ -1,6 +1,8 @@
 ﻿using Autofac;
 using Quartz;
 using Quartz.Impl;
+using Quartz.Impl.Matchers;
+using Quartz.Spi;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -14,8 +16,6 @@ namespace Idv.CircleHsiao.QuartzWithAutofacSample
 {
     class Program
     {
-        private static IContainer _container;
-
         static void Main(string[] args)
         {
             #region Sample data
@@ -42,7 +42,7 @@ namespace Idv.CircleHsiao.QuartzWithAutofacSample
                 IntervalSec = 3,
                 RepeatCount = 0,
                 WillRepeatForever = true,
-                StartAt = DateTime.Now.AddSeconds(10).ToString("yyyy-MM-dd hh:mm:ss")
+                StartAt = DateTime.Now.AddSeconds(10).ToString("yyyy-MM-dd HH:mm:ss")
             };
 
             TriggerSetting ts2 = new TriggerSetting
@@ -52,7 +52,7 @@ namespace Idv.CircleHsiao.QuartzWithAutofacSample
                 IntervalSec = 5,
                 RepeatCount = 2,
                 WillRepeatForever = false,
-                StartAt = DateTime.Now.AddSeconds(10).ToString("yyyy-MM-dd hh:mm:ss")
+                StartAt = DateTime.Now.AddSeconds(10).ToString("yyyy-MM-dd HH:mm:ss")
             };
 
             TriggerSetting ts3 = new TriggerSetting
@@ -62,7 +62,7 @@ namespace Idv.CircleHsiao.QuartzWithAutofacSample
                 IntervalSec = 1,
                 RepeatCount = 10,
                 WillRepeatForever = false,
-                StartAt = DateTime.Now.AddSeconds(10).ToString("yyyy-MM-dd hh:mm:ss")
+                StartAt = DateTime.Now.AddSeconds(10).ToString("yyyy-MM-dd HH:mm:ss")
             };
 
             ScheduleSetting schSetting = new ScheduleSetting
@@ -85,14 +85,15 @@ namespace Idv.CircleHsiao.QuartzWithAutofacSample
             {
                 Assembly asm = Assembly.LoadFrom(dll);
                 if (asm != null)
+                {
                     foreach (Type eachType in asm.GetExportedTypes())
                         if (eachType.GetInterface("IJob") != null && // must impl IJob
                             schSetting.JobSettings.Any(j => j.Namespace == eachType.Namespace) && // also belongs to our solu
                             !typesImplIJob.Any(tij => tij.Name == eachType.Name)) // and not repeated
-                        {
                             typesImplIJob.Add(eachType);
-                            asmCollToReg.Add(asm);
-                        }
+                    if (!asmCollToReg.Any(element => element == asm))
+                        asmCollToReg.Add(asm);
+                }
             });
             #endregion
 
@@ -101,8 +102,11 @@ namespace Idv.CircleHsiao.QuartzWithAutofacSample
             var sched = sf.GetScheduler();
             typesImplIJob.ForEach(typeImplIJob =>
             {
+                // Reg & match class impl IJob with Key(class name)
                 builder.RegisterAssemblyTypes(asmCollToReg.ToArray())
-                    .Where(t => t.Name == typeImplIJob.Name).Keyed<IJob>(typeImplIJob.Name);
+                    .Where(t => t.Name == typeImplIJob.Name) // decide to build which IJob Impl class's instance
+                    .Keyed<IJob>(typeImplIJob.Name) // para match to class name
+                    .WithParameter("input", typeImplIJob.Name + " :D"); // para for ctor, para1 is variable name
 
                 #region Create JobDetail by sample data
 
@@ -146,11 +150,11 @@ namespace Idv.CircleHsiao.QuartzWithAutofacSample
                             tb.StartAt(DateTime.Parse(tSett.StartAt));
                         else // if expired
                             // and the time today has passed as well
-                            if (DiffDateOfSameTime(DateTime.Now, when) < DateTime.Now)
+                            if (RestructDateAndTime(DateTime.Now, when) < DateTime.Now)
                                 // fire at the same time tomorrow
-                                tb.StartAt(DiffDateOfSameTime(DateTime.Now, when).AddDays(1));
+                                tb.StartAt(RestructDateAndTime(DateTime.Now, when).AddDays(1));
                             else // fire at the time today
-                                tb.StartAt(DiffDateOfSameTime(DateTime.Now, when));
+                                tb.StartAt(RestructDateAndTime(DateTime.Now, when));
                     }
 
                     ITrigger trigger = tb.Build();
@@ -163,8 +167,11 @@ namespace Idv.CircleHsiao.QuartzWithAutofacSample
                 });
                 #endregion
             });
-            _container = builder.Build();
-            var test = _container.ResolveKeyed<IJob>("MyJob2");
+            var container = builder.Build();
+            sched.JobFactory = new AutofacJobFactory(container);
+
+            QuartzJobListener globalJobListener = new QuartzJobListener();
+            sched.ListenerManager.AddJobListener(globalJobListener, GroupMatcher<JobKey>.AnyGroup());
 
             // start the schedule
             sched.Start();
@@ -174,12 +181,69 @@ namespace Idv.CircleHsiao.QuartzWithAutofacSample
             sched.Shutdown(true);
         }
 
-        private static DateTime DiffDateOfSameTime(DateTime datePart, DateTime timePart)
+        /// <summary>Restruct a new DateTime obj by parameters</summary>
+        /// <param name="datePart">Date part of new DateTime obj</param>
+        /// <param name="timePart">Time part of new DateTime obj</param>
+        /// <returns>new DateTime obj</returns>
+        private static DateTime RestructDateAndTime(DateTime datePart, DateTime timePart)
         {
             return new DateTime(datePart.Year, datePart.Month, datePart.Day,
                 timePart.Hour, timePart.Minute, timePart.Second, timePart.Millisecond);
         }
     }
+
+    #region Factory to spec how to build each IJob instance
+    // In this case by ctor inject Autofac container
+    sealed class AutofacJobFactory : IJobFactory
+    {
+        IContainer _container;
+
+        public AutofacJobFactory(IContainer inj)
+        {
+            _container = inj;
+        }
+
+        /// <summary>Core, build IJob instance</summary>
+        public IJob NewJob(TriggerFiredBundle bundle, IScheduler scheduler)
+        {
+            // use bundle.JobDetail.Key.Name to decide which specific class to build
+            return _container.ResolveKeyed<IJob>(bundle.JobDetail.Key.Name);
+        }
+
+        public void ReturnJob(IJob job)
+        {
+        }
+    }
+    #endregion
+
+    #region Global listener of Quartz
+    sealed class QuartzJobListener : IJobListener
+    {
+        public QuartzJobListener()
+        {
+        }
+
+        public string Name
+        {
+            get { return "QuartzJobListener"; }
+        }
+
+        public void JobToBeExecuted(IJobExecutionContext context)
+        {
+        }
+
+        public void JobWasExecuted(IJobExecutionContext inContext, JobExecutionException inException)
+        {
+            if (inException != null)
+            {
+            }
+        }
+
+        public void JobExecutionVetoed(IJobExecutionContext inContext)
+        {
+        }
+    }
+    #endregion
 
     #region Classes for sample data
     public class ScheduleSetting
